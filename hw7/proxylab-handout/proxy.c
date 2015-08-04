@@ -1,5 +1,5 @@
 #include <stdio.h>
-
+#include "csapp.h"
 /* Recommended max cache and object sizes */
 #define MAX_CACHE_SIZE 1049000
 #define MAX_OBJECT_SIZE 102400
@@ -16,22 +16,31 @@ struct cache_block{
 	int readcnt;
 	int write_request;
 	sem_t mutex, w;
-};
+}cache_block;
 
+
+void *thread(void *vargp);
+int parse_url(char *url, char *hostname, char *port, char *query);
+int connect_server(char *hostname, char *port, char *query);
+void cache_init();
+int cache_read(char *url, char *response, int timestamp);
+void cache_write(char *response, char *url, int timestamp);
 /* You won't lose style points for including these long lines in your code */
-static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 Firefox/10.0.3\r\n";
-static const char *accept_hdr = "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n";
-static const char *accept_encoding_hdr = "Accept-Encoding: gzip, deflate\r\n";
-static const char *connection_hdr = "Connection: close\r\n";
-static const char *proxy_connection_hdr = "Proxy-Connection: close\r\n";
+static char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 Firefox/10.0.3\r\n";
+static char *accept_hdr = "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n";
+static char *accept_encoding_hdr = "Accept-Encoding: gzip, deflate\r\n";
+static char *connection_hdr = "Connection: close\r\n";
+static char *proxy_connection_hdr = "Proxy-Connection: close\r\n";
 
 static int cache_cnt;
 static int time_cur;
+static struct cache_block *caches;
 
 int main(int argc, char **argv)
 {
-	int port, listenfd, clientlen, connfd;
-	struct socketaddr_in clientaddr;
+	int listenfd, clientlen;
+	char *port;
+	struct sockaddr_in clientaddr;
 	struct connfd_timed *clientconnfd;
 	pthread_t tid;
     printf("%s%s%s", user_agent_hdr, accept_hdr, accept_encoding_hdr);
@@ -45,7 +54,7 @@ int main(int argc, char **argv)
     if (argc != 2){
         exit(0);
     }
-	port = atoi(argv[1]);
+	port = argv[1];
 	
 	/* listen connection */
     listenfd = Open_listenfd(port);
@@ -55,7 +64,7 @@ int main(int argc, char **argv)
 		/* accept connection */
 		clientconnfd = (struct connfd_timed *)Malloc(sizeof(struct connfd_timed));
 		clientlen = sizeof(clientaddr);
-        clientconnfd->connfd = Accept(listenfd, (SA*)(&clientaddr), &clientlen);
+        clientconnfd->connfd = Accept(listenfd, (SA*)(&clientaddr), (socklen_t *)(&clientlen));
 		clientconnfd->timestamp = time_cur++;
 		/* create new thread to handle the connection */
         Pthread_create(&tid, NULL, thread, (void *)(&clientconnfd));
@@ -70,7 +79,6 @@ void *thread(void *vargp){
 	rio_t rio;
 	char buf[MAX_LINE], method[MAX_LINE], version[MAX_LINE], url[MAX_LINE];
 	char host[MAX_LINE], port[MAX_LINE], query[MAX_LINE];
-	int i;
 	char *response;
 	int clientfd;
 	int count;
@@ -80,7 +88,7 @@ void *thread(void *vargp){
 	/* read socket */
     rio_readinitb(&rio, connfd);
     rio_readlineb(&rio, buf, MAX_LINE);
-    sscanf(buf, "%s %s %s", method, url, http);
+    sscanf(buf, "%s %s %s", method, url, version);
 
 	/* only GET */
     if(strcasecmp(method, "GET")){
@@ -91,7 +99,7 @@ void *thread(void *vargp){
     /* cache hit */
 	response=(char*)Malloc(MAX_OBJECT_SIZE);
 	response[0]='\0';
-	if (cache_read(url, response)){
+	if (cache_read(url, response, timestamp)){
 		rio_writen(connfd, response, strlen(response));
 		Close(connfd);
 		free(response);
@@ -143,7 +151,7 @@ void *thread(void *vargp){
 		strncat(response, buf, count);
 		rio_writen(connfd, buf, count);
 	}
-	cache_add(response, url, timestamp);
+	cache_write(response, url, timestamp);
 	Close(clientfd);
     Close(connfd);
     free(response);
@@ -172,7 +180,7 @@ int parse_url(char *url, char *hostname, char *port, char *query){
 	
 	/* parse */
 	pointer = hostname;
-	while ((c = (char *)(temp + i)) != '\0'){
+	while ((c = temp[i]) != '\0'){
 		if (c == ':'){
 			if (in_query){
 				return 1;
@@ -202,7 +210,7 @@ int parse_url(char *url, char *hostname, char *port, char *query){
  */
 int connect_server(char *hostname, char *port, char *query){
     char buf[MAXLINE];
-    int clientfd = open_clientfd(hostname, atoi(port));
+    int clientfd = open_clientfd(hostname, port);
 
     /* connection failed */
     if(clientfd < 0)
@@ -223,6 +231,8 @@ int connect_server(char *hostname, char *port, char *query){
 }
 
 void cache_init(){
+	int i;
+	caches = (struct cache_block *)(malloc(cache_cnt*sizeof(struct cache_block)));
 	for (i=0;i<cache_cnt;i++){
 		caches[i].timestamp = 0;    
 		caches[i].url[0] = '\0';
@@ -238,7 +248,7 @@ void cache_init(){
  * if miss, return 0,
  * if hit, fill response, and return 1
  */
-int cache_read(char *url, char *response){
+int cache_read(char *url, char *response, int timestamp){
 	int i;
 	for (i = 0; i<cache_cnt; i++){
 		while (caches[i].write_request){
@@ -296,7 +306,7 @@ void cache_write(char *response, char *url, int timestamp){
 	 */
 	for (i=0;i<cache_cnt;i++){
 		if (caches[i].timestamp < min_timestamp){
-			min_timestamp = caches[i].timestamp
+			min_timestamp = caches[i].timestamp;
 			evict = i;
 		}
 	}
